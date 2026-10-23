@@ -1,0 +1,19 @@
+{
+  "sorevnovanie": {
+    "podgotovka": "02.11.2026",
+    "nachalo": "04.01.2027",
+    "konec": "24.01.2027"
+  },
+  "lyzhniki": [
+    {"id": 1, "fio": "Иванов Пётр Сергеевич", "razryad": "МС", "do_formy": 9, "v_forme": 4, "pobedy": 12},
+    {"id": 2, "fio": "Смирнов Алексей Игоревич", "razryad": "КМС", "do_formy": 8, "v_forme": 4, "pobedy": 7},
+    {"id": 3, "fio": "Кузнецов Дмитрий Олегович", "razryad": "МСМК", "do_formy": 10, "v_forme": 2, "pobedy": 15},
+    {"id": 4, "fio": "Попов Артём Викторович", "razryad": "I", "do_formy": 7, "v_forme": 3, "pobedy": 5},
+    {"id": 5, "fio": "Васильев Никита Андреевич", "razryad": "МС", "do_formy": 11, "v_forme": 3, "pobedy": 9},
+    {"id": 6, "fio": "Соколов Егор Павлович", "razryad": "КМС", "do_formy": 9, "v_forme": 2, "pobedy": 6},
+    {"id": 7, "fio": "Михайлов Илья Денисович", "razryad": "II", "do_formy": 5, "v_forme": 3, "pobedy": 2},
+    {"id": 8, "fio": "Новиков Кирилл Романович", "razryad": "КМС", "do_formy": 12, "v_forme": 3, "pobedy": 4},
+    {"id": 9, "fio": "Фёдоров Максим Евгеньевич", "razryad": "I", "do_formy": 8, "v_forme": 2, "pobedy": 3},
+    {"id": 10, "fio": "Морозов Роман Алексеевич", "razryad": "МС", "do_formy": 10, "v_forme": 1, "pobedy": 8}
+  ]
+}
