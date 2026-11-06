@@ -90,6 +90,15 @@ class Baza:
                 par.append(f'%{v}%')
         return self.vse('WHERE ' + ' AND '.join(usl) if usl else '', par)
 
+    def poisk_odno(self, v, pole=None):
+        """Адаптивный поиск: подстрока в выбранном поле или в любом, без учёта регистра."""
+        v = v.strip().lower()
+        if not v:
+            return self.vse()
+        polya = [pole] if pole else POLYA
+        usl = ' OR '.join(f'low(CAST({p} AS TEXT)) LIKE ?' for p in polya)
+        return self.vse('WHERE ' + usl, [f'%{v}%'] * len(polya))
+
     def import_json(self, put):
         """Файл: список лыжников или {"sorevnovanie": {...}, "lyzhniki": [...]}."""
         with open(put, encoding='utf-8') as f:
@@ -180,9 +189,17 @@ class Prilozhenie(tk.Tk):
         for e, v in zip(self.daty, ('02.11.2026', '04.01.2027', '24.01.2027')):
             ust(e, v)
         self.polya = self.ramka('Поля поиска и редактирования', ZAG, 3, side=tk.BOTTOM)
-        for e in self.polya:
-            e.bind('<KeyRelease>', self.zhivoy_poisk)
-            e.bind('<<ComboboxSelected>>', self.zhivoy_poisk)
+        self.knopka_ochistki = ttk.Button(self.polya[0].master, text='Очистить поля', command=self.ochistit_polya)
+        self.knopka_ochistki.grid(row=0, column=6, rowspan=2, padx=10)
+        f = ttk.LabelFrame(self, text='Адаптивный поиск')
+        f.pack(fill=tk.X, padx=8, pady=4)
+        self.gde = ttk.Combobox(f, values=('Любое поле',) + ZAG, state='readonly', width=24)
+        self.gde.current(0)
+        self.gde.pack(side=tk.LEFT, padx=3, pady=3)
+        self.stroka = ttk.Entry(f, width=50)
+        self.stroka.pack(side=tk.LEFT, padx=3, pady=3)
+        self.stroka.bind('<KeyRelease>', self.zhivoy_poisk)
+        self.gde.bind('<<ComboboxSelected>>', self.zhivoy_poisk)
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
         self.tab = self.vkladka('БД', ttk.Treeview, columns=POLYA, show='headings')
@@ -221,7 +238,9 @@ class Prilozhenie(tk.Tk):
 
     # --- вспомогательные ---
     def pokazat(self, zapisi=None, nadpis='Записей в БД'):
-        zapisi = self.bd.vse() if zapisi is None else zapisi
+        if zapisi is None:  # показываем всю БД - строка поиска больше не действует
+            zapisi = self.bd.vse()
+            ust(self.stroka, '')
         self.nb.select(0)
         self.tab.delete(*self.tab.get_children())
         for z in zapisi:
@@ -346,12 +365,24 @@ class Prilozhenie(tk.Tk):
 
     @bezopasno
     def pereiti(self):
-        n = self.nomer()
+        """По № или, если он пуст, к первой записи, подходящей по заполненным полям."""
+        nashli = None
+        if self.polya[0].get().strip():
+            n = self.nomer()
+        else:
+            f = self.forma()
+            if not any(v.strip() for v in f.values()):
+                raise ValueError('Заполните № или любое другое поле')
+            nashli = self.bd.poisk(f)
+            if not nashli:
+                raise ValueError('По заполненным полям записей не найдено')
+            n = nashli[0][0]
         if not self.tab.exists(str(n)):
             self.pokazat()
         if not self.tab.exists(str(n)):
             raise ValueError(f'Запись {n} не найдена')
         self.vydelit(n)
+        self.status['text'] = f'Переход к записи № {n}' + (f' (подходит записей: {len(nashli)})' if nashli else '')
 
     @bezopasno
     def redaktirovat(self):
@@ -376,7 +407,13 @@ class Prilozhenie(tk.Tk):
         self.pokazat(self.bd.poisk(self.forma()), 'Найдено записей')
 
     def zhivoy_poisk(self, _=None):
-        self.pokazat(self.bd.poisk(self.forma()), 'Найдено записей')
+        i = self.gde.current()
+        self.pokazat(self.bd.poisk_odno(self.stroka.get(), POLYA[i - 1] if i else None), 'Найдено записей')
+
+    def ochistit_polya(self):
+        for e in self.polya:
+            ust(e, '')
+        self.tab.selection_remove(*self.tab.selection())  # чтобы клик по той же строке снова заполнил поля
 
     def ochistit(self):
         if mb.askyesno('Очистка БД', 'Удалить все записи из БД?'):
