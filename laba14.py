@@ -1,578 +1,388 @@
-# Лаба 14 - обработка JSON файлов, без pandas
-# группа ИСТбд-22, вариант 9 "Список команды"
-# лыжник: ФИО, разряд, срок достижения макс. спортивной формы (нед.),
-# срок сохранения макс. формы (нед.), победы.
-# Ввод: начало и конец соревнования (+ дата начала подготовки, от неё считаются недели).
-# Обработка: распределение лыжников по макс. спортивной форме в течение соревнований,
-# формирование команды (5 - основной состав, 2 - резерв).
-
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import sqlite3
 import json
 import os
+import sqlite3
+import tkinter as tk
 from datetime import datetime, timedelta
+from tkinter import ttk, filedialog, messagebox as mb
 
 PAPKA = os.path.dirname(os.path.abspath(__file__))
-PUT_BD = os.path.join(PAPKA, 'komanda.db')
-PUT_JSON = os.path.join(PAPKA, 'komanda.json')
-FORMAT_DATY = '%d.%m.%Y'
-OSNOVA = 5
-REZERV = 2
-
-POLYA = ['id', 'fio', 'razryad', 'do_formy', 'v_forme', 'pobedy']
-ZAGOLOVKI = {'id': '№', 'fio': 'ФИО лыжника', 'razryad': 'Разряд',
-             'do_formy': 'До пика формы, нед.', 'v_forme': 'Сохранение формы, нед.', 'pobedy': 'Победы'}
-CELYE = {'id', 'do_formy', 'v_forme', 'pobedy'}
-# от сильного разряда к слабому - индекс используется при сортировке
-RAZRYADY = ['МСМК', 'МС', 'КМС', 'I', 'II', 'III', 'б/р']
-SINONIMY = {'1': 'I', '2': 'II', '3': 'III'}
-
-DATY = ['podgotovka', 'nachalo', 'konec']
-ZAGOLOVKI_DAT = {'podgotovka': 'Начало подготовки', 'nachalo': 'Начало соревнования',
-                 'konec': 'Конец соревнования'}
-
-VSTAVKA = "INSERT INTO lyzhniki VALUES (" + ",".join("?" * len(POLYA)) + ")"
+BD, FD, OSNOVA, REZERV = os.path.join(PAPKA, 'komanda.db'), '%d.%m.%Y', 5, 2
+POLYA = ('id', 'fio', 'razryad', 'do_formy', 'v_forme', 'pobedy')
+ZAG = ('№', 'ФИО лыжника', 'Разряд', 'До пика формы, нед.', 'Сохранение формы, нед.', 'Победы')
+RAZRYADY = ('МСМК', 'МС', 'КМС', 'I', 'II', 'III', 'б/р')  # от сильного к слабому
+DATY = {'podgotovka': 'Начало подготовки', 'nachalo': 'Начало соревнования', 'konec': 'Конец соревнования'}
+GRUPPY = ('весь период', 'частично', 'пик до старта', 'пик после финиша')
+LEGENDA = (('основной', '#2e9d4f', 'основной состав'), ('резерв', '#f0a020', 'резерв'), ('', '#aaa', 'не в команде'))
+CVET = {k: c for k, c, _ in LEGENDA}
+TIPY = [('JSON', '*.json'), ('Все файлы', '*.*')]
 
 
-# ---------------- backend ----------------
 
-def podklyuchit():
-    return sqlite3.connect(PUT_BD)
-
-
-def sozdat_tablitsu(con):
-    con.execute("""CREATE TABLE IF NOT EXISTS lyzhniki (
-        id       INTEGER PRIMARY KEY,
-        fio      TEXT NOT NULL,
-        razryad  TEXT,
-        do_formy INTEGER,
-        v_forme  INTEGER,
-        pobedy   INTEGER)""")
-    con.commit()
-
-
-def privesti(pole, znach):
-    # пустая строка -> None, целые поля -> int, разряд -> из списка RAZRYADY
-    if znach is None:
-        return None
-    znach = str(znach).strip()
-    if znach == '':
-        return None
-    if pole in CELYE:
-        chislo = int(znach)
-        if chislo < 0:
-            raise ValueError(ZAGOLOVKI[pole] + ": значение не может быть отрицательным")
-        return chislo
+def privesti(pole, v):
+    """Значение из формы/JSON -> тип поля БД (пусто -> None)."""
+    v = '' if v is None else str(v).strip()
+    if not v or pole == 'fio':
+        return v or None
     if pole == 'razryad':
-        znach = SINONIMY.get(znach, znach)
-        if znach not in RAZRYADY:
-            raise ValueError("Разряд должен быть одним из: " + ", ".join(RAZRYADY))
-    return znach
+        v = {'1': 'I', '2': 'II', '3': 'III'}.get(v, v)
+        if v not in RAZRYADY:
+            raise ValueError('Разряд - одно из: ' + ', '.join(RAZRYADY))
+        return v
+    if not v.isdigit():
+        raise ValueError(ZAG[POLYA.index(pole)] + ': нужно целое число >= 0')
+    return int(v)
 
 
-def proverit_zapis(znach):
-    # для ввода/редактирования все поля, кроме id, обязательны
-    for p, v in zip(POLYA[1:], znach[1:]):
-        if v is None:
-            raise ValueError("Не заполнено поле: " + ZAGOLOVKI[p])
-    if znach[POLYA.index('v_forme')] == 0:
-        raise ValueError("Срок сохранения формы должен быть больше 0")
-    return znach
+def zapis(d):
+    """Словарь -> проверенный список значений (все поля, кроме №, обязательны)."""
+    if not isinstance(d, dict):
+        raise ValueError('ожидался объект JSON')
+    z = [privesti(p, d.get(p)) for p in POLYA]
+    pustye = [n for n, v in zip(ZAG[1:], z[1:]) if v is None]
+    if pustye:
+        raise ValueError('Не заполнено: ' + ', '.join(pustye))
+    if z[4] == 0:
+        raise ValueError('Срок сохранения формы должен быть > 0')
+    return z
 
 
-def razobrat_datu(tekst, nazv):
+def data(tekst, nazv):
     try:
-        return datetime.strptime(tekst.strip(), FORMAT_DATY).date()
+        return datetime.strptime(tekst.strip(), FD).date()
     except ValueError:
-        raise ValueError(nazv + ": нужна дата в формате ДД.ММ.ГГГГ")
+        raise ValueError(nazv + ': нужна дата ДД.ММ.ГГГГ') from None
 
 
-class Lyzhnik:
-    def __init__(self, slovar):
-        # один объект JSON -> один лыжник, значения сразу приводятся к типам БД
-        self.znach = proverit_zapis([privesti(p, slovar.get(p)) for p in POLYA])
+class Baza:
+    def __init__(self, put):
+        self.con = sqlite3.connect(put)
+        self.con.create_function('low', 1, lambda s: s and s.lower(), deterministic=True)  # LIKE для кириллицы
+        self.sql('CREATE TABLE IF NOT EXISTS lyzhniki (id INTEGER PRIMARY KEY, fio TEXT NOT NULL, '
+                 'razryad TEXT, do_formy INTEGER, v_forme INTEGER, pobedy INTEGER)')
+
+    def sql(self, q, par=(), mnogo=False):
+        with self.con:  # одна транзакция: commit при успехе, rollback при ошибке
+            return (self.con.executemany if mnogo else self.con.execute)(q, par)
+
+    def vse(self, gde='', par=()):
+        return self.sql(f'SELECT * FROM lyzhniki {gde} ORDER BY id', par).fetchall()
+
+    def dobavit(self, z):
+        return self.sql('INSERT INTO lyzhniki VALUES (?,?,?,?,?,?)', z).lastrowid
+
+    def izmenit(self, z):
+        return self.sql('UPDATE lyzhniki SET fio=?, razryad=?, do_formy=?, v_forme=?, pobedy=? WHERE id=?',
+                        z[1:] + z[:1]).rowcount
+
+    def udalit(self, n):
+        return self.sql('DELETE FROM lyzhniki WHERE id=?', (n,)).rowcount
+
+    def ochistit(self):
+        self.sql('DELETE FROM lyzhniki')
+
+    def poisk(self, filtr):
+        """Живой поиск: каждое заполненное поле ищется как подстрока, без учёта регистра."""
+        usl, par = [], []
+        for p, v in filtr.items():
+            v = v.strip().lower()
+            if v:
+                usl.append(f'low(CAST({p} AS TEXT)) LIKE ?')
+                par.append(f'%{v}%')
+        return self.vse('WHERE ' + ' AND '.join(usl) if usl else '', par)
+
+    def import_json(self, put):
+        """Файл: список лыжников или {"sorevnovanie": {...}, "lyzhniki": [...]}."""
+        with open(put, encoding='utf-8') as f:
+            d = json.load(f)
+        d = {'lyzhniki': d} if isinstance(d, list) else d
+        if not isinstance(d, dict) or not isinstance(d.get('lyzhniki'), list):
+            raise ValueError("В файле нет списка 'lyzhniki'")
+        zapisi = []
+        for i, z in enumerate(d['lyzhniki'], 1):
+            try:
+                zapisi.append(zapis(z))
+            except ValueError as e:
+                raise ValueError(f'Запись {i}: {e}') from None
+        self.sql('INSERT OR REPLACE INTO lyzhniki VALUES (?,?,?,?,?,?)', zapisi, mnogo=True)
+        s = d.get('sorevnovanie')
+        return len(zapisi), s if isinstance(s, dict) else {}
+
+    def export_json(self, put, sorev, rez=None):
+        d = {'sorevnovanie': sorev, 'lyzhniki': [dict(zip(POLYA, z)) for z in self.vse()]}
+        if rez:
+            fio = lambda ls: [x['fio'] for x in ls]
+            d['rezultat'] = {
+                'osnovnoy_sostav': fio(rez['reiting'][:OSNOVA]),
+                'rezerv': fio(rez['reiting'][OSNOVA:OSNOVA + REZERV]),
+                'raspredelenie': {g: fio(ls) for g, ls in rez['gruppy'].items()},
+                'po_nedelyam': [{'s': a.strftime(FD), 'po': b.strftime(FD), 'lyzhniki': f} for a, b, f in rez['nedeli']]}
+        with open(put, 'w', encoding='utf-8') as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+        return len(d['lyzhniki'])
 
 
-def zagruzit_json(put):
-    # файл - либо список лыжников, либо {"sorevnovanie": {...}, "lyzhniki": [...]}
-    with open(put, 'r', encoding='utf-8') as f:
-        dannye = json.load(f)
-    if isinstance(dannye, list):
-        dannye = {'lyzhniki': dannye}
-    if not isinstance(dannye, dict) or not isinstance(dannye.get('lyzhniki'), list):
-        raise ValueError("В файле нет списка 'lyzhniki'")
-    spisok = []
-    for nomer, z in enumerate(dannye['lyzhniki'], 1):
-        if not isinstance(z, dict):
-            raise ValueError(f"Запись {nomer}: ожидался объект JSON")
-        try:
-            spisok.append(Lyzhnik(z))
-        except ValueError as oshibka:
-            raise ValueError(f"Запись {nomer}: {oshibka}")
-    sorev = dannye.get('sorevnovanie') if isinstance(dannye.get('sorevnovanie'), dict) else {}
-    return spisok, sorev
-
-
-def import_json(con, put):
-    sozdat_tablitsu(con)
-    spisok, sorev = zagruzit_json(put)
-    # записи без id получают новый номер, с id - заменяют существующие
-    con.executemany(VSTAVKA.replace("INSERT", "INSERT OR REPLACE", 1), [l.znach for l in spisok])
-    con.commit()
-    return len(spisok), sorev
-
-
-def sohranit_json(con, put, sorev, rez=None):
-    dannye = {'sorevnovanie': sorev,
-              'lyzhniki': [dict(zip(POLYA, z)) for z in vse_zapisi(con)]}
-    if rez is not None:
-        dannye['rezultat'] = {
-            'osnovnoy_sostav': [l['fio'] for l in rez['osnova']],
-            'rezerv': [l['fio'] for l in rez['rezerv']],
-            'raspredelenie': {k: [l['fio'] for l in v] for k, v in rez['gruppy'].items()},
-            'v_forme_po_nedelyam': [{'nedelya': n['nomer'], 's': n['s'].strftime(FORMAT_DATY),
-                                     'po': n['po'].strftime(FORMAT_DATY), 'lyzhniki': n['fio']}
-                                    for n in rez['nedeli']]}
-    with open(put, 'w', encoding='utf-8') as f:
-        json.dump(dannye, f, ensure_ascii=False, indent=2)
-    return len(dannye['lyzhniki'])
-
-
-def vse_zapisi(con):
-    return con.execute("SELECT * FROM lyzhniki ORDER BY id").fetchall()
-
-
-def odna_zapis(con, id_l):
-    return con.execute("SELECT * FROM lyzhniki WHERE id = ?", (id_l,)).fetchone()
-
-
-def dobavit_zapis(con, znach):
-    cur = con.execute(VSTAVKA, znach)
-    con.commit()
-    return cur.lastrowid
-
-
-def izmenit_zapis(con, znach):
-    sets = ", ".join(p + " = ?" for p in POLYA[1:])
-    cur = con.execute("UPDATE lyzhniki SET " + sets + " WHERE id = ?", znach[1:] + [znach[0]])
-    con.commit()
-    return cur.rowcount
-
-
-def udalit_zapis(con, id_l):
-    cur = con.execute("DELETE FROM lyzhniki WHERE id = ?", (id_l,))
-    con.commit()
-    return cur.rowcount
-
-
-def poisk(con, filtry):
-    # filtry - словарь поле -> строка; ФИО ищем по подстроке, остальное - точно
-    usl, par = [], []
-    for pole, znach in filtry.items():
-        if znach.strip() == '':
-            continue
-        if pole == 'fio':
-            usl.append("fio LIKE ?")
-            par.append("%" + znach.strip() + "%")
-        else:
-            usl.append(pole + " = ?")
-            par.append(privesti(pole, znach))
-    sql = "SELECT * FROM lyzhniki"
-    if usl:
-        sql += " WHERE " + " AND ".join(usl)
-    return con.execute(sql + " ORDER BY id", par).fetchall()
-
-
-def ochistit_bd(con):
-    con.execute("DELETE FROM lyzhniki")
-    con.commit()
-
-
-def analiz_variant_9(zapisi, podgotovka, nachalo, konec):
-    if konec < nachalo:
-        raise ValueError("Конец соревнования раньше начала")
-    if nachalo < podgotovka:
-        raise ValueError("Соревнование начинается раньше начала подготовки")
-    dney = (konec - nachalo).days + 1
-
-    # 1. пик формы каждого лыжника и его пересечение с соревнованием (в днях, включительно)
-    lyzhniki = []
+def analiz(zapisi, podg, nach, kon):
+    """Пик формы каждого лыжника, его пересечение с соревнованием, группы, недели, команда."""
+    if kon < nach or nach < podg:
+        raise ValueError('Нужно: начало подготовки <= начало соревнования <= конец')
+    dney, ls = (kon - nach).days + 1, []
     for z in zapisi:
-        l = dict(zip(POLYA, z))
-        l['pik_s'] = podgotovka + timedelta(weeks=l['do_formy'])
-        l['pik_po'] = l['pik_s'] + timedelta(weeks=l['v_forme'], days=-1)
-        s, po = max(l['pik_s'], nachalo), min(l['pik_po'], konec)
-        l['dney_v_forme'] = max(0, (po - s).days + 1)
-        if l['dney_v_forme'] == dney:
-            l['status'] = 'весь период'
-        elif l['dney_v_forme'] > 0:
-            l['status'] = 'частично'
-        elif l['pik_po'] < nachalo:
-            l['status'] = 'пик до старта'
-        else:
-            l['status'] = 'пик после финиша'
-        lyzhniki.append(l)
-
-    # 2. распределение по группам
-    gruppy = {k: [] for k in ('весь период', 'частично', 'пик до старта', 'пик после финиша')}
-    for l in lyzhniki:
-        gruppy[l['status']].append(l)
-
-    # 3. распределение по неделям соревнования: кто в пике формы хотя бы день недели
-    nedeli = []
-    s = nachalo
-    while s <= konec:
-        po = min(s + timedelta(days=6), konec)
-        nedeli.append({'nomer': len(nedeli) + 1, 's': s, 'po': po,
-                       'fio': [l['fio'] for l in lyzhniki if l['pik_s'] <= po and l['pik_po'] >= s]})
-        s = po + timedelta(days=1)
-
-    # 4. рейтинг: дни в форме, затем разряд, затем победы
-    reiting = sorted(lyzhniki, key=lambda l: (-l['dney_v_forme'], RAZRYADY.index(l['razryad']),
-                                               -l['pobedy'], l['fio']))
-    for mesto, l in enumerate(reiting, 1):
-        l['mesto'] = mesto
-        l['sostav'] = 'основной' if mesto <= OSNOVA else 'резерв' if mesto <= OSNOVA + REZERV else ''
-    return {'dney': dney, 'lyzhniki': lyzhniki, 'gruppy': gruppy, 'nedeli': nedeli,
-            'reiting': reiting, 'osnova': reiting[:OSNOVA],
-            'rezerv': reiting[OSNOVA:OSNOVA + REZERV],
-            'podgotovka': podgotovka, 'nachalo': nachalo, 'konec': konec}
+        x = dict(zip(POLYA, z))
+        s = x['pik_s'] = podg + timedelta(weeks=x['do_formy'])
+        po = x['pik_po'] = s + timedelta(weeks=x['v_forme'], days=-1)
+        d = x['dney'] = max(0, (min(po, kon) - max(s, nach)).days + 1)  # дней в форме на соревновании
+        x['status'] = GRUPPY[0 if d == dney else 1 if d else 2 if po < nach else 3]
+        ls.append(x)
+    # рейтинг: дни в форме -> разряд -> победы; первые 5 - основа, следующие 2 - резерв
+    ls.sort(key=lambda x: (-x['dney'], RAZRYADY.index(x['razryad']), -x['pobedy'], x['fio']))
+    for m, x in enumerate(ls, 1):
+        x['mesto'], x['sostav'] = m, 'основной' if m <= OSNOVA else 'резерв' if m <= OSNOVA + REZERV else ''
+    nedeli = [(a, min(a + timedelta(6), kon)) for a in (nach + timedelta(weeks=i) for i in range((dney + 6) // 7))]
+    return {'dney': dney, 'reiting': ls, 'daty': (podg, nach, kon),
+            'gruppy': {g: [x for x in ls if x['status'] == g] for g in GRUPPY},
+            'nedeli': [(a, b, [x['fio'] for x in ls if x['pik_s'] <= b and x['pik_po'] >= a]) for a, b in nedeli]}
 
 
-# ---------------- frontend ----------------
+
+def ust(e, v):
+    e.delete(0, tk.END)
+    e.insert(0, v)
+
+
+def bezopasno(metod):
+    """Ошибки ввода/файлов/БД в любом обработчике кнопки -> messagebox."""
+    def obertka(self, *a):
+        try:
+            return metod(self, *a)
+        except (ValueError, OSError, sqlite3.Error) as e:
+            mb.showerror('Ошибка', str(e))
+    return obertka
+
 
 class Prilozhenie(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Лаб.14 - JSON, список команды лыжников, ИСТбд-22 вариант 9")
-        self.geometry("1100x760")
-        self.con = podklyuchit()
-        sozdat_tablitsu(self.con)
-        self.rez = None
-
-        # панель кнопок (два ряда)
-        panel = tk.Frame(self)
-        panel.pack(fill=tk.X, padx=10, pady=5)
-        knopki = [("Импорт JSON в БД", self.importirovat),
-                  ("Сохранить в JSON", self.sohranit),
-                  ("Просмотр БД", self.obnovit_tablitsu),
-                  ("Вычислить значения", self.vychislit),
-                  ("Очистить БД", self.ochistit),
-                  ("Ввести запись", self.vvesti),
-                  ("Перейти к записи", self.pereiti),
-                  ("Редактировать запись", self.redaktirovat),
-                  ("Удалить запись", self.udalit),
-                  ("Поиск по полям", self.iskat)]
-        for i, (tekst, cmd) in enumerate(knopki):
-            tk.Button(panel, text=tekst, command=cmd, width=20).grid(row=i // 5, column=i % 5, padx=4, pady=2)
-
-        self.status = tk.Label(panel, text="БД пуста")
+        self.title('Лаб.14 - JSON, список команды лыжников (ИСТбд-22, вариант 9)')
+        self.geometry('1100x740')
+        self.bd, self.rez = Baza(BD), None
+        p = ttk.Frame(self)
+        p.pack(fill=tk.X, padx=8, pady=4)
+        knopki = (('Импорт JSON в БД', self.importirovat), ('Сохранить в JSON', self.sohranit),
+                  ('Просмотр БД', self.pokazat), ('Вычислить значения', self.vychislit),
+                  ('Очистить БД', self.ochistit), ('Ввести запись', self.vvesti), ('Перейти к записи', self.pereiti),
+                  ('Редактировать запись', self.redaktirovat), ('Удалить запись', self.udalit),
+                  ('Поиск по полям', self.iskat))
+        for i, (t, c) in enumerate(knopki):
+            ttk.Button(p, text=t, command=c, width=22).grid(row=i // 5, column=i % 5, padx=2, pady=2)
+        self.status = ttk.Label(p)
         self.status.grid(row=0, column=5, rowspan=2, padx=10)
+        self.daty = self.ramka('Соревнование (ДД.ММ.ГГГГ)', DATY.values(), 3)
+        for e, v in zip(self.daty, ('02.11.2026', '04.01.2027', '24.01.2027')):
+            ust(e, v)
+        self.polya = self.ramka('Поля поиска и редактирования', ZAG, 3, side=tk.BOTTOM)
+        for e in self.polya:
+            e.bind('<KeyRelease>', self.zhivoy_poisk)
+            e.bind('<<ComboboxSelected>>', self.zhivoy_poisk)
+        self.nb = ttk.Notebook(self)
+        self.nb.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        self.tab = self.vkladka('БД', ttk.Treeview, columns=POLYA, show='headings')
+        for p, z in zip(POLYA, ZAG):
+            self.tab.heading(p, text=z)
+            self.tab.column(p, width={'id': 50, 'fio': 260}.get(p, 140))
+        self.tab.bind('<<TreeviewSelect>>', self.v_formu)
+        self.tekst = self.vkladka('Вычисленные характеристики', tk.Text, wrap=tk.NONE, font=('Consolas', 10))
+        self.holst = self.vkladka('Диаграмма формы', tk.Canvas, bg='white')
+        self.holst.bind('<Configure>', lambda _: self.risovat())
+        self.izmenilos()
 
-        # ввод параметров соревнования
-        ramka_daty = tk.LabelFrame(self, text="Соревнование (ДД.ММ.ГГГГ)")
-        ramka_daty.pack(fill=tk.X, padx=10, pady=(0, 5))
-        self.daty = {}
-        po_umolch = {'podgotovka': '02.11.2026', 'nachalo': '04.01.2027', 'konec': '24.01.2027'}
-        for i, d in enumerate(DATY):
-            tk.Label(ramka_daty, text=ZAGOLOVKI_DAT[d]).grid(row=0, column=i * 2, sticky=tk.E, padx=3, pady=3)
-            e = tk.Entry(ramka_daty, width=12)
-            e.insert(0, po_umolch[d])
-            e.grid(row=0, column=i * 2 + 1, padx=(3, 15), pady=3)
-            self.daty[d] = e
+    # --- построение окна ---
+    def ramka(self, nazv, metki, kolonok, side=tk.TOP):
+        f = ttk.LabelFrame(self, text=nazv)
+        f.pack(side=side, fill=tk.X, padx=8, pady=4)
+        polya = []
+        for i, m in enumerate(metki):
+            r, c = divmod(i, kolonok)
+            ttk.Label(f, text=m).grid(row=r, column=2 * c, sticky=tk.E, padx=3, pady=2)
+            e = (ttk.Combobox(f, values=('',) + RAZRYADY, width=10) if m == 'Разряд'
+                 else ttk.Entry(f, width=34 if m.startswith('ФИО') else 12))
+            e.grid(row=r, column=2 * c + 1, sticky=tk.W, padx=3, pady=2)
+            polya.append(e)
+        return polya
 
-        # вкладки
-        vkladki = ttk.Notebook(self)
-        vkladki.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-        vkl_dannye = tk.Frame(vkladki)
-        vkladki.add(vkl_dannye, text="БД")
-        self.tablitsa = ttk.Treeview(vkl_dannye, columns=POLYA, show='headings', height=15)
-        for p in POLYA:
-            self.tablitsa.heading(p, text=ZAGOLOVKI[p])
-            shir = {'id': 50, 'fio': 280, 'razryad': 80}.get(p, 150)
-            self.tablitsa.column(p, width=shir, anchor=tk.W)
-        skrol = ttk.Scrollbar(vkl_dannye, orient=tk.VERTICAL, command=self.tablitsa.yview)
-        self.tablitsa.configure(yscroll=skrol.set)
-        self.tablitsa.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0), pady=5)
-        skrol.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
-        self.tablitsa.bind('<<TreeviewSelect>>', self.vybor_stroki)
-
-        vkl_rezult = tk.Frame(vkladki)
-        vkladki.add(vkl_rezult, text="Вычисленные характеристики")
-        self.tekst_rezult = tk.Text(vkl_rezult, wrap=tk.NONE, state=tk.DISABLED, font=("Consolas", 10))
-        skrol_r = ttk.Scrollbar(vkl_rezult, orient=tk.VERTICAL, command=self.tekst_rezult.yview)
-        self.tekst_rezult.configure(yscroll=skrol_r.set)
-        self.tekst_rezult.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0), pady=5)
-        skrol_r.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
-
-        vkl_diagr = tk.Frame(vkladki)
-        vkladki.add(vkl_diagr, text="Диаграмма формы")
-        self.holst = tk.Canvas(vkl_diagr, bg='white')
-        skrol_d = ttk.Scrollbar(vkl_diagr, orient=tk.VERTICAL, command=self.holst.yview)
-        self.holst.configure(yscrollcommand=skrol_d.set)
-        self.holst.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0), pady=5)
-        skrol_d.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
-        self.holst.bind('<Configure>', lambda _: self.narisovat())
-        self.vkladki = vkladki
-
-        # поля поиска и редактирования
-        ramka_pola = tk.LabelFrame(self, text="Поля поиска и редактирования")
-        ramka_pola.pack(fill=tk.X, padx=10, pady=(0, 8))
-        self.polya = {}
-        for i, p in enumerate(POLYA):
-            tk.Label(ramka_pola, text=ZAGOLOVKI[p]).grid(row=i % 2, column=(i // 2) * 2, sticky=tk.E, padx=3, pady=2)
-            if p == 'razryad':
-                e = ttk.Combobox(ramka_pola, values=[''] + RAZRYADY, width=10)
-            else:
-                e = tk.Entry(ramka_pola, width=34 if p == 'fio' else 12)
-            e.grid(row=i % 2, column=(i // 2) * 2 + 1, padx=3, pady=2, sticky=tk.W)
-            self.polya[p] = e
-
-        self.obnovit_tablitsu()
+    def vkladka(self, nazv, klass, **kw):
+        f = ttk.Frame(self.nb)
+        self.nb.add(f, text=nazv)
+        w = klass(f, **kw)
+        sb = ttk.Scrollbar(f, command=w.yview)
+        w.configure(yscrollcommand=sb.set)
+        w.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        return w
 
     # --- вспомогательные ---
-    def pokazat(self, zapisi, tekst=None):
-        self.vkladki.select(0)
-        self.tablitsa.delete(*self.tablitsa.get_children())
+    def pokazat(self, zapisi=None, nadpis='Записей в БД'):
+        zapisi = self.bd.vse() if zapisi is None else zapisi
+        self.nb.select(0)
+        self.tab.delete(*self.tab.get_children())
         for z in zapisi:
-            self.tablitsa.insert('', tk.END, iid=str(z[0]), values=['' if v is None else v for v in z])
-        self.status.config(text=tekst or ("Записей в БД: " + str(len(zapisi))))
+            self.tab.insert('', tk.END, iid=str(z[0]), values=z)
+        self.status['text'] = f'{nadpis}: {len(zapisi)}'
 
-    def sobrat_polya(self):
-        return [privesti(p, self.polya[p].get()) for p in POLYA]
-
-    def vybor_stroki(self, _=None):
-        vyb = self.tablitsa.selection()
-        if not vyb:
-            return
-        znach = self.tablitsa.item(vyb[0], 'values')
-        for p, v in zip(POLYA, znach):
-            self.polya[p].delete(0, tk.END)
-            self.polya[p].insert(0, v)
-
-    def id_iz_polya(self):
-        try:
-            return int(self.polya['id'].get())
-        except ValueError:
-            messagebox.showwarning("Ошибка", "Введите числовой номер записи (№).")
-            return None
-
-    def sobrat_daty(self):
-        return {d: razobrat_datu(self.daty[d].get(), ZAGOLOVKI_DAT[d]) for d in DATY}
-
-    def vyvesti_tekst(self, stroki):
-        self.tekst_rezult.configure(state=tk.NORMAL)
-        self.tekst_rezult.delete('1.0', tk.END)
-        self.tekst_rezult.insert(tk.END, "\n".join(stroki))
-        self.tekst_rezult.configure(state=tk.DISABLED)
-
-    def sbrosit_rezultat(self):
-        # данные изменились - старый расчёт больше не актуален
+    def izmenilos(self):
+        """Данные изменились - старый расчёт неактуален."""
         self.rez = None
-        self.narisovat()
+        self.vyvod('Нажмите «Вычислить значения».')
+        self.risovat()
+        self.pokazat()
+
+    def vyvod(self, tekst):
+        self.tekst.configure(state=tk.NORMAL)
+        self.tekst.delete('1.0', tk.END)
+        self.tekst.insert(tk.END, tekst)
+        self.tekst.configure(state=tk.DISABLED)
+
+    def v_formu(self, _=None):
+        for s in self.tab.selection()[:1]:
+            for e, v in zip(self.polya, self.tab.item(s, 'values')):
+                ust(e, v)
+
+    def forma(self):
+        return {p: e.get() for p, e in zip(POLYA, self.polya)}
+
+    def nomer(self):
+        n = privesti('id', self.polya[0].get())
+        if n is None:
+            raise ValueError('Введите номер записи (№)')
+        return n
+
+    def vydelit(self, n):
+        self.nb.select(0)
+        self.tab.selection_set(str(n))
+        self.tab.see(str(n))
 
     # --- кнопки ---
+    @bezopasno
     def importirovat(self):
-        put = filedialog.askopenfilename(
-            title="Выберите JSON файл",
-            filetypes=(("JSON файлы", "*.json"), ("Все файлы", "*.*")),
-            initialdir=PAPKA)
-        if not put:
-            return
-        try:
-            kol, sorev = import_json(self.con, put)
-        except (OSError, ValueError, sqlite3.Error) as oshibka:
-            messagebox.showerror("Ошибка импорта", str(oshibka))
-            return
-        for d in DATY:
-            if sorev.get(d):
-                self.daty[d].delete(0, tk.END)
-                self.daty[d].insert(0, str(sorev[d]))
-        self.sbrosit_rezultat()
-        self.obnovit_tablitsu()
-        messagebox.showinfo("Импорт", "Импортировано записей: " + str(kol))
+        put = filedialog.askopenfilename(title='JSON файл', filetypes=TIPY, initialdir=PAPKA)
+        if put:
+            n, sorev = self.bd.import_json(put)
+            for e, k in zip(self.daty, DATY):
+                if sorev.get(k):
+                    ust(e, sorev[k])
+            self.izmenilos()
+            mb.showinfo('Импорт', f'Импортировано записей: {n}')
 
+    @bezopasno
     def sohranit(self):
-        put = filedialog.asksaveasfilename(
-            title="Сохранить набор данных в JSON", defaultextension=".json",
-            filetypes=(("JSON файлы", "*.json"), ("Все файлы", "*.*")),
-            initialdir=PAPKA, initialfile=os.path.basename(PUT_JSON))
-        if not put:
-            return
-        sorev = {d: self.daty[d].get().strip() for d in DATY}
-        try:
-            kol = sohranit_json(self.con, put, sorev, self.rez)
-        except OSError as oshibka:
-            messagebox.showerror("Ошибка сохранения", str(oshibka))
-            return
-        dop = " (с результатами расчёта)" if self.rez else ""
-        messagebox.showinfo("Сохранение", f"Сохранено записей: {kol}{dop}\n{put}")
+        put = filedialog.asksaveasfilename(defaultextension='.json', filetypes=TIPY,
+                                           initialdir=PAPKA, initialfile='komanda.json')
+        if put:
+            sorev = {k: e.get().strip() for k, e in zip(DATY, self.daty)}
+            n = self.bd.export_json(put, sorev, self.rez)
+            mb.showinfo('Сохранение', f'Сохранено записей: {n}' + (' + результат расчёта' if self.rez else ''))
 
-    def obnovit_tablitsu(self):
-        self.pokazat(vse_zapisi(self.con))
-
+    @bezopasno
     def vychislit(self):
-        zapisi = vse_zapisi(self.con)
+        zapisi = self.bd.vse()
         if not zapisi:
-            self.sbrosit_rezultat()
-            self.vyvesti_tekst(["ВАРИАНТ 9 (ИСТбд-22)", "=" * 60, "Нет данных. Импортируйте JSON в БД."])
-            self.vkladki.select(1)
-            return
-        try:
-            d = self.sobrat_daty()
-            r = analiz_variant_9(zapisi, d['podgotovka'], d['nachalo'], d['konec'])
-        except ValueError as oshibka:
-            messagebox.showerror("Ошибка ввода", str(oshibka))
-            return
-        self.rez = r
-        f = lambda x: x.strftime(FORMAT_DATY)
-        s = ["ВАРИАНТ 9 (ИСТбд-22) - СПИСОК КОМАНДЫ", "=" * 92,
-             f"Подготовка с {f(r['podgotovka'])}; соревнование {f(r['nachalo'])} - {f(r['konec'])} "
-             f"({r['dney']} дн.)", f"Лыжников в БД: {len(r['lyzhniki'])}", "",
-             "1. РАСПРЕДЕЛЕНИЕ ПО МАКСИМАЛЬНОЙ СПОРТИВНОЙ ФОРМЕ",
-             f"{'Место':<6}{'ФИО':<28}{'Разряд':<8}{'Пик формы':<25}{'Дней в форме':<14}{'Статус':<18}Побед",
-             "-" * 92]
-        for l in r['reiting']:
-            s.append(f"{l['mesto']:<6}{l['fio'][:27]:<28}{l['razryad']:<8}"
-                     f"{f(l['pik_s']) + ' - ' + f(l['pik_po']):<25}"
-                     f"{str(l['dney_v_forme']) + ' из ' + str(r['dney']):<14}{l['status']:<18}{l['pobedy']}")
-        s += ["", "Итого по группам:"]
-        for nazv, gr in r['gruppy'].items():
-            s.append(f"  {nazv:<18} {len(gr):>2} чел." + (": " + ", ".join(l['fio'] for l in gr) if gr else ""))
-        s += ["", "По неделям соревнования (в пике формы хотя бы один день):"]
-        for n in r['nedeli']:
-            s.append(f"  неделя {n['nomer']} ({f(n['s'])} - {f(n['po'])}): {len(n['fio'])} чел.")
-
-        s += ["", f"2. КОМАНДА ({OSNOVA} - основной состав, {REZERV} - резерв)",
-              "Отбор: больше дней в пике формы на соревновании -> выше разряд -> больше побед", ""]
-        for nazv, gr in (("Основной состав", r['osnova']), ("Резерв", r['rezerv'])):
-            s.append(nazv + ":")
-            for l in gr:
-                s.append(f"  {l['mesto']}. {l['fio']} ({l['razryad']}, побед: {l['pobedy']}, "
-                         f"в форме {l['dney_v_forme']} дн.)")
-        if len(r['reiting']) < OSNOVA + REZERV:
-            s.append(f"! Лыжников меньше {OSNOVA + REZERV} - команда неполная.")
-        vne = [l['fio'] for l in r['osnova'] + r['rezerv'] if l['dney_v_forme'] == 0]
+            raise ValueError('БД пуста - импортируйте JSON или введите записи')
+        r = self.rez = analiz(zapisi, *(data(e.get(), n) for e, n in zip(self.daty, DATY.values())))
+        f = lambda d: d.strftime(FD)
+        podg, nach, kon = r['daty']
+        s = [f'Подготовка с {f(podg)}; соревнование {f(nach)} - {f(kon)} ({r["dney"]} дн.); лыжников: {len(zapisi)}',
+             '', '1. РАСПРЕДЕЛЕНИЕ ПО МАКСИМАЛЬНОЙ СПОРТИВНОЙ ФОРМЕ',
+             f'{"Место":<6}{"ФИО":<28}{"Разряд":<8}{"Пик формы":<25}{"Дней в форме":<14}{"Статус":<18}Побед', '-' * 92]
+        s += [f'{x["mesto"]:<6}{x["fio"][:27]:<28}{x["razryad"]:<8}{f(x["pik_s"]) + " - " + f(x["pik_po"]):<25}'
+              f'{x["dney"]:<14}{x["status"]:<18}{x["pobedy"]}' for x in r['reiting']]
+        s += ['', 'По группам:'] + [f'  {g:<18}{len(ls):>2} чел. ' + ', '.join(x['fio'] for x in ls)
+                                    for g, ls in r['gruppy'].items()]
+        s += ['', 'По неделям соревнования (в пике формы хотя бы 1 день):']
+        s += [f'  {i}) {f(a)} - {f(b)}: {len(fio)} чел.' for i, (a, b, fio) in enumerate(r['nedeli'], 1)]
+        s += ['', f'2. КОМАНДА ({OSNOVA} основной состав + {REZERV} резерв), отбор: дни в форме -> разряд -> победы']
+        for nazv, k in (('Основной состав', 'основной'), ('Резерв', 'резерв')):
+            s += [nazv + ':'] + [f'  {x["mesto"]}. {x["fio"]} ({x["razryad"]}, побед {x["pobedy"]}, '
+                                 f'в форме {x["dney"]} дн.)' for x in r['reiting'] if x['sostav'] == k]
+        if len(zapisi) < OSNOVA + REZERV:
+            s.append(f'! Лыжников меньше {OSNOVA + REZERV} - команда неполная')
+        vne = [x['fio'] for x in r['reiting'] if x['sostav'] and not x['dney']]
         if vne:
-            s.append("! В команду попали лыжники вне пика формы: " + ", ".join(vne))
-        self.vyvesti_tekst(s)
-        self.narisovat()
-        self.vkladki.select(1)
+            s.append('! В команде лыжники вне пика формы: ' + ', '.join(vne))
+        self.vyvod('\n'.join(s))
+        self.risovat()
+        self.nb.select(1)
 
-    def narisovat(self):
-        # диаграмма: полоса пика формы каждого лыжника на фоне периода соревнования
-        c = self.holst
+    def risovat(self):
+        """Диаграмма: полоса пика формы каждого лыжника на фоне периода соревнования."""
+        c, r = self.holst, self.rez
         c.delete('all')
-        r = self.rez
-        if r is None:
-            c.create_text(20, 20, anchor=tk.NW, text="Нажмите «Вычислить значения».", font=("Arial", 11))
-            c.configure(scrollregion=(0, 0, 0, 0))
-            return
-        shir = max(c.winfo_width(), 600)
-        lev, verh, shag = 200, 60, 26
-        t0 = r['podgotovka']
-        t1 = max([r['konec']] + [l['pik_po'] for l in r['lyzhniki']]) + timedelta(days=7)
-        dney = (t1 - t0).days
-        x = lambda d: lev + (d - t0).days / dney * (shir - lev - 20)
-        niz = verh + shag * len(r['reiting'])
+        if not r:
+            return c.create_text(20, 20, anchor=tk.NW, text='Нажмите «Вычислить значения».')
+        (podg, nach, kon), ls = r['daty'], r['reiting']
+        w, lev, verh, h = max(c.winfo_width(), 600), 210, 50, 24
+        dn = (max([kon] + [x['pik_po'] for x in ls]) - podg).days + 8
+        X = lambda d, plus=0: lev + ((d - podg).days + plus) / dn * (w - lev - 20)
+        niz = verh + h * len(ls)
+        c.create_rectangle(X(nach), verh - 8, X(kon, 1), niz, fill='#dce6ff', outline='#5577cc')
+        for n in range(0, dn // 7 + 1, 2):
+            xx = X(podg, 7 * n)
+            c.create_line(xx, verh - 8, xx, niz, fill='#ddd')
+            c.create_text(xx, niz + 4, anchor=tk.N, text=n, font=('Arial', 8))
+        c.create_text(lev, niz + 18, anchor=tk.NW, text='недели от начала подготовки', font=('Arial', 8))
+        for i, x in enumerate(ls):
+            y = verh + i * h
+            c.create_text(lev - 6, y + h / 2, anchor=tk.E, text=f'{x["mesto"]}. {x["fio"][:24]}')
+            c.create_rectangle(X(x['pik_s']), y + 5, X(x['pik_po'], 1), y + h - 5, fill=CVET[x['sostav']], outline='')
+        for j, (_, cv, t) in enumerate(LEGENDA):
+            c.create_rectangle(lev + j * 150, 12, lev + j * 150 + 14, 26, fill=cv, outline='')
+            c.create_text(lev + j * 150 + 20, 19, anchor=tk.W, text=t)
+        c.configure(scrollregion=(0, 0, w, niz + 40))
 
-        c.create_rectangle(x(r['nachalo']), verh - 10, x(r['konec'] + timedelta(days=1)), niz,
-                           fill='#dce6ff', outline='#5577cc')
-        c.create_text(x(r['nachalo']) + 3, verh - 12, anchor=tk.SW, text="соревнование", fill='#3355aa')
-        nedelya = 0
-        while t0 + timedelta(weeks=nedelya) <= t1:
-            xx = x(t0 + timedelta(weeks=nedelya))
-            c.create_line(xx, verh - 10, xx, niz, fill='#e0e0e0')
-            if nedelya % 2 == 0:
-                c.create_text(xx, niz + 4, anchor=tk.N, text=str(nedelya), font=("Arial", 8))
-            nedelya += 1
-        c.create_text(lev, niz + 20, anchor=tk.NW, text="недели от начала подготовки", font=("Arial", 8))
-
-        tsvet = {'основной': '#2e9d4f', 'резерв': '#f0a020', '': '#a0a0a0'}
-        for i, l in enumerate(r['reiting']):
-            y = verh + i * shag
-            c.create_text(lev - 8, y + shag / 2, anchor=tk.E, text=f"{l['mesto']}. {l['fio'][:24]}")
-            c.create_rectangle(x(l['pik_s']), y + 5, x(l['pik_po'] + timedelta(days=1)), y + shag - 5,
-                               fill=tsvet[l['sostav']], outline='')
-        for j, (nazv, k) in enumerate((("основной состав", 'основной'), ("резерв", 'резерв'),
-                                       ("не в команде", ''))):
-            c.create_rectangle(lev + j * 150, 10, lev + j * 150 + 14, 24, fill=tsvet[k], outline='')
-            c.create_text(lev + j * 150 + 20, 17, anchor=tk.W, text=nazv)
-        c.configure(scrollregion=(0, 0, shir, niz + 40))
-
+    @bezopasno
     def vvesti(self):
-        try:
-            znach = proverit_zapis(self.sobrat_polya())
-            nov_id = dobavit_zapis(self.con, znach)
-        except (ValueError, sqlite3.Error) as oshibka:
-            messagebox.showerror("Ошибка добавления", str(oshibka))
-            return
-        self.polya['id'].delete(0, tk.END)
-        self.polya['id'].insert(0, str(nov_id))
-        self.sbrosit_rezultat()
-        self.obnovit_tablitsu()
-        self.pereiti()
+        n = self.bd.dobavit(zapis(self.forma()))
+        ust(self.polya[0], n)
+        self.izmenilos()
+        self.vydelit(n)
 
+    @bezopasno
     def pereiti(self):
-        id_l = self.id_iz_polya()
-        if id_l is None:
-            return
-        if odna_zapis(self.con, id_l) is None:
-            messagebox.showinfo("Переход", "Запись с таким номером не найдена.")
-            return
-        if not self.tablitsa.exists(str(id_l)):
-            self.obnovit_tablitsu()
-        self.vkladki.select(0)
-        self.tablitsa.selection_set(str(id_l))
-        self.tablitsa.focus(str(id_l))
-        self.tablitsa.see(str(id_l))
+        n = self.nomer()
+        if not self.tab.exists(str(n)):
+            self.pokazat()
+        if not self.tab.exists(str(n)):
+            raise ValueError(f'Запись {n} не найдена')
+        self.vydelit(n)
 
+    @bezopasno
     def redaktirovat(self):
-        try:
-            znach = self.sobrat_polya()
-            if znach[0] is None:
-                raise ValueError("Номер записи (№) обязателен")
-            izm = izmenit_zapis(self.con, proverit_zapis(znach))
-        except (ValueError, sqlite3.Error) as oshibka:
-            messagebox.showerror("Ошибка редактирования", str(oshibka))
-            return
-        if izm == 0:
-            messagebox.showinfo("Редактирование", "Запись с таким номером не найдена.")
-            return
-        self.sbrosit_rezultat()
-        self.obnovit_tablitsu()
-        self.pereiti()
+        z = zapis(self.forma())
+        if z[0] is None:
+            raise ValueError('Номер записи (№) обязателен')
+        if not self.bd.izmenit(z):
+            raise ValueError(f'Запись {z[0]} не найдена')
+        self.izmenilos()
+        self.vydelit(z[0])
 
+    @bezopasno
     def udalit(self):
-        id_l = self.id_iz_polya()
-        if id_l is None:
-            return
-        if not messagebox.askyesno("Удаление", f"Удалить запись {id_l}?"):
-            return
-        if udalit_zapis(self.con, id_l) == 0:
-            messagebox.showinfo("Удаление", "Запись не найдена.")
-        self.sbrosit_rezultat()
-        self.obnovit_tablitsu()
+        n = self.nomer()
+        if mb.askyesno('Удаление', f'Удалить запись {n}?'):
+            if not self.bd.udalit(n):
+                raise ValueError(f'Запись {n} не найдена')
+            self.izmenilos()
 
+    @bezopasno
     def iskat(self):
-        filtry = {p: self.polya[p].get() for p in POLYA}
-        try:
-            nashli = poisk(self.con, filtry)
-        except (ValueError, sqlite3.Error) as oshibka:
-            messagebox.showerror("Ошибка поиска", str(oshibka))
-            return
-        self.pokazat(nashli, "Найдено записей: " + str(len(nashli)))
+        self.pokazat(self.bd.poisk(self.forma()), 'Найдено записей')
+
+    def zhivoy_poisk(self, _=None):
+        self.pokazat(self.bd.poisk(self.forma()), 'Найдено записей')
 
     def ochistit(self):
-        if not messagebox.askyesno("Очистка БД", "Удалить все записи из БД?"):
-            return
-        ochistit_bd(self.con)
-        self.obnovit_tablitsu()
-        self.vychislit()
+        if mb.askyesno('Очистка БД', 'Удалить все записи из БД?'):
+            self.bd.ochistit()
+            self.izmenilos()
 
 
-if __name__ == "__main__":
-    app = Prilozhenie()
-    app.mainloop()
+if __name__ == '__main__':
+    Prilozhenie().mainloop()
